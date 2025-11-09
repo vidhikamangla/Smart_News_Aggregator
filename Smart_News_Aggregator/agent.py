@@ -1,9 +1,33 @@
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.tools import google_search
 from google.adk.agents.llm_agent import Agent
+import os
 
 GEMINI_MODEL = "gemini-2.5-flash"
+import smtplib
+from email.mime.text import MIMEText
 
+def send_email_smtp(to_addr: str, subject: str, html_body: str) -> str:
+    ""
+    # SMTP configuration for sending OTP emails
+    SMTP_SERVER = 'smtp.gmail.com'
+    SMTP_PORT = 587
+    SMTP_USER = os.environ.get('SMTP_USER')
+    SMTP_PASSWORD = os.environ.get('SMTP_PASS')
+    from_addr = 'vidhikamangla@gmail.com'
+
+    msg = MIMEText(f'Your OTP code is:')
+    msg['Subject'] = subject
+    msg['From'] = from_addr
+    msg['To'] = to_addr
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+    except Exception as e:
+        return f"ERROR: {e}"
+    
 # ----------------------------
 # Agent 1: Topic Asking + Info Retrieval Agent
 # ----------------------------
@@ -52,6 +76,26 @@ multilingual_agent = LlmAgent(
     """,
     output_key="translated_text"
 )
+# -------------------------------------------------------------------------
+# 3. email Agent
+# ------------------------------------------------------------------------
+
+email_agent = LlmAgent(
+    name="EmailNotificationAgent",
+    model=GEMINI_MODEL,
+    instruction="""
+Compose a concise email about the {translated_text} Inputs from state amd send to address as given by the user 
+Requirements:
+- Subject <= 90 chars. Put the most important topic first.
+- Body: short HTML with 3-5 bullets, each 1 line.
+- Include a 'Read more' line if there is a URL in state.
+- If content is missing, say 'No new updates.'
+Then call send_email_smtp(to_addr, subject, html_body)
+Return only 'OK' or 'ERROR: ...' from the call.
+""",
+    tools=[send_email_smtp],
+    output_key="email_status"
+)
 
 # ----------------------------
 # Root Sequential Agent (Pipeline)
@@ -65,12 +109,13 @@ root_agent = Agent(
     3. Then asks the user for a target language.
     4. Uses the multilingual agent to translate the info into that language.
     """,
-    sub_agents=[topic_info_agent, multilingual_agent],
+    sub_agents=[topic_info_agent, multilingual_agent, email_agent],
     instruction="""You are a study assistant. The workflow is:
     1. Ask the user for a topic they want to know about.
     2. Use google search to summarize the topic. output just the markdown file for that topic summary.
     3. Ask the user which language they want the explanation in.
     4. Pass the gathered info to the multilingual agent to translate.
-    Finally, return the translated summary.
+    5. return the translated summary and ask the user for their email address to send them that translated text.
+    use email agent for that.
     """
 )
