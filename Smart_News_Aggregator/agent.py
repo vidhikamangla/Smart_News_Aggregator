@@ -37,7 +37,7 @@ from .Scrapers.states_scraper import scrape_states_top_n
 
 
 STYLE_OF_WRITING = "sarcastic"
-TARGET_LANGUAGE = "hi"  # ISO code, e.g. hi=Hindi, en=English, ta=Tamil
+TARGET_LANGUAGE = "esp"  # ISO code, e.g. hi=Hindi, en=English, ta=Tamil
 
 
 class NewsItem(BaseModel):
@@ -68,7 +68,7 @@ VALID_STATES: Set[str] = {
 }
 
 
-# GUARDRAILS
+# EMAIL TOOL
 
 def send_email_smtp(to_addr: str, subject: str, html_body: str) -> str:
     SMTP_SERVER = os.environ.get("SMTP_HOST", "smtp.gmail.com")
@@ -104,6 +104,62 @@ def send_email_smtp(to_addr: str, subject: str, html_body: str) -> str:
     except Exception as e:
         return f"ERROR: {e}"
     
+    
+# -------------------------------------------------------------
+
+def before_agent_callback(callback_context: CallbackContext):
+    """Logs start of agent execution."""
+    state = callback_context.state
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Initialize global counter
+    state["run_counter"] = state.get("run_counter", 0) + 1
+    state["last_agent_start"] = timestamp
+
+    print(f"\n=== AGENT START] ===")
+    print(f"Run #: {state['run_counter']}")
+    print(f"Timestamp: {timestamp}")
+
+    # Also logging via logging module
+    # logging.info(f"Starting agent (Run #{state['run_counter']}) at {timestamp}")
+
+    return None
+
+
+def after_agent_callback(callback_context: CallbackContext):
+    """Logs end of agent execution and duration."""
+    state = callback_context.state
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Compute duration if possible
+    try:
+        start_str = state.get("last_agent_start")
+        if start_str:
+            start_dt = datetime.datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+            duration = (datetime.datetime.now() - start_dt).total_seconds()
+        else:
+            duration = None
+    except Exception:
+        duration = None
+
+    print(f"=== AGENT END ===")
+    # if duration is not None:
+    #     print(f"Duration: {duration:.2f}s")
+    #     logging.info(f"Completed agent in {duration:.2f}s")
+    # else:
+    #     logging.info(f"Completed agent (no duration recorded)")
+
+    # Record completion in state
+    state["last_agent_end"] = timestamp
+    state.setdefault("agent_timeline", []).append({
+        "completed_at": timestamp,
+        "duration_sec": duration
+    })
+
+    return None
+
+# GUARDRAIL 
+
 def input_guardrail(callback_context: CallbackContext, llm_request: LlmRequest) -> Optional[LlmResponse]:
     last_user_text = ""
     if llm_request.contents:
@@ -144,7 +200,6 @@ def tool_guardrail(tool: BaseTool, args: Dict[str, Any], tool_context: ToolConte
 def wrap(items: list) -> List[NewsItem]:
     return [NewsItem(**item) for item in items if item.get("article")]
 
-
 def get_states_news(state: str, limit: int = 10) -> List[NewsItem]:
     return wrap(scrape_states_top_n(state, limit))
 
@@ -174,6 +229,8 @@ scraper_agent = LlmAgent(
     ],
     output_key="scraper_output",
     before_model_callback=input_guardrail,
+    before_agent_callback=before_agent_callback,
+    after_agent_callback=after_agent_callback,
     before_tool_callback=tool_guardrail,
 )
 
@@ -182,19 +239,21 @@ summariser_agent = LlmAgent(
     name="summariser_agent",
     description=f"Summarises scraped articles and writes in a {STYLE_OF_WRITING} tone.",
     instruction=(
-        f"You will receive an essay OR a guardrail message.\n"
-        "If input is a guardrail message (starts with !!! or 📰), just repeat it as-is.\n\n"
-        f"Otherwise, write a **clean markdown news report** in a **{STYLE_OF_WRITING} tone**.\n\n"
+        f"You will receive scraper_output (list of news items) OR a guardrail message.\n"
+        "If input is a guardrail message (starts with 🚫 or 📰), just repeat it as-is.\n\n"
+        f"Otherwise, write a *clean markdown news report* in a *{STYLE_OF_WRITING} tone*.\n\n"
         "CRITICAL RULES:\n"
         "• Output ONLY markdown.\n"
         "• For each article:\n"
         "   ## Title\n"
+        "   *Date:* | *Author:* | [Source](link) | *Image:* image_url\n"
         "   Summary paragraph (120-160 words).\n"
         "• No bullet lists or prefaces.\n"
     ),
     output_key="summary_output",
+    before_agent_callback=before_agent_callback,
+    after_agent_callback=after_agent_callback,
 )
-
 
 multilingual_agent = LlmAgent(
     name="MultilingualTranslatorAgent",
@@ -206,6 +265,8 @@ multilingual_agent = LlmAgent(
         "(ISO 639-1 code), preserving all markdown structure.\n"
     ),
     output_key="translated_text",
+    before_agent_callback=before_agent_callback,
+    after_agent_callback=after_agent_callback,
 )
 
 email_agent = LlmAgent(
@@ -220,7 +281,7 @@ Steps:
    - brief intro + 3-5 bullets distilled from (translated_text) for each news article (convert Markdown to HTML bullets).
    - for all articles, If any URL appears, add 'Read more:' with the URL, after that all  respective articles
 3) Call send_email_smtp(
-   to_addr=sanya.goel.22cse@bmu.edu.in,
+   to_addr=manavendra.singh.22cse@bmu.edu.in,
    subject=subject,
    html_body=html
 )
@@ -228,8 +289,11 @@ Steps:
 Return only the tool's string ('OK' or 'ERROR: ...').
 """,
     tools=[send_email_smtp],
-    output_key="email_status"
+    output_key="email_status",
+    before_agent_callback=before_agent_callback,
+    after_agent_callback=after_agent_callback,
 )
+
 
 root_agent = SequentialAgent(
     name="NewsPipeline",
