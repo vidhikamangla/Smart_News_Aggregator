@@ -3,6 +3,9 @@ trial.py
 agent_e.py
 agent_old.py
 venv/
-Smart_News_Aggregator\__pycache__/
-Smart_News_Aggregator\Scrapers\__pycache__/
+__pycache__/
+Smart_News_Aggregator/__pycache__/
+Smart_News_Aggregator/Scrapers/__pycache__/
 agent_mcp_trial.py
+agent_perf.py
+
