@@ -5,3 +5,4 @@ agent_old.py
 venv/
 Smart_News_Aggregator\__pycache__/
 Smart_News_Aggregator\Scrapers\__pycache__/
+agent_mcp_trial.py

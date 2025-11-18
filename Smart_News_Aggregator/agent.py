@@ -29,12 +29,20 @@ import os
 from email.mime.text import MIMEText
 import smtplib
 
-from .Scrapers.entertainment_scraper import scrape_entertainment_top_n
-from .Scrapers.sports_scraper import scrape_sports_top_n
-from .Scrapers.international_scraper import scrape_international_top_n
-from .Scrapers.national_scraper import scrape_national_top_n
-from .Scrapers.states_scraper import scrape_states_top_n
+from Scrapers.entertainment_scraper import scrape_entertainment_top_n
+from Scrapers.sports_scraper import scrape_sports_top_n
+from Scrapers.international_scraper import scrape_international_top_n
+from Scrapers.national_scraper import scrape_national_top_n
+from Scrapers.states_scraper import scrape_states_top_n
 
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Verify API key is loaded
+if not os.getenv("GOOGLE_API_KEY"):
+    print("WARNING: GOOGLE_API_KEY not found in .env file!")
 
 STYLE_OF_WRITING = "sarcastic"
 TARGET_LANGUAGE = "esp"  # ISO code, e.g. hi=Hindi, en=English, ta=Tamil
@@ -281,7 +289,7 @@ Steps:
    - brief intro + 3-5 bullets distilled from (translated_text) for each news article (convert Markdown to HTML bullets).
    - for all articles, If any URL appears, add 'Read more:' with the URL, after that all  respective articles
 3) Call send_email_smtp(
-   to_addr=manavendra.singh.22cse@bmu.edu.in,
+   to_addr=vidhika.mangla.22cse@bmu.edu.in,
    subject=subject,
    html_body=html
 )
@@ -301,54 +309,56 @@ root_agent = SequentialAgent(
     description=f"Fetch → Summarise → Translate (with guardrail awareness).-> send email"
 )
 
-async def main():
-    session_service = InMemorySessionService()
-    SESSION_ID = str(uuid.uuid4())
-    USER_ID = "vid"
-    APP_NAME = "SmartNewsAggregator"
+__all__ = ['root_agent']
 
-    state_context = {"user": "Vidhika", "guardrail_output": None, "abort_pipeline": False}
+# async def main():
+#     session_service = InMemorySessionService()
+#     SESSION_ID = str(uuid.uuid4())
+#     USER_ID = "vid"
+#     APP_NAME = "SmartNewsAggregator"
 
-    session = await session_service.create_session(
-        app_name=APP_NAME,
-        user_id=USER_ID,
-        session_id=SESSION_ID,
-        state=state_context
-    )
+#     state_context = {"user": "Vidhika", "guardrail_output": None, "abort_pipeline": False}
 
-    print(f"Session ID: {session.id}")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name=APP_NAME)
+#     session = await session_service.create_session(
+#         app_name=APP_NAME,
+#         user_id=USER_ID,
+#         session_id=SESSION_ID,
+#         state=state_context
+#     )
 
-    while True:
-        user_input = input("\nYou > ")
-        if user_input.lower() == "quit":
-            break
+#     print(f"Session ID: {session.id}")
+#     runner = Runner(agent=root_agent, session_service=session_service, app_name=APP_NAME)
 
-        state = (await session_service.get_session(APP_NAME, USER_ID, SESSION_ID)).state
-        input_text = state.get("guardrail_output") if state.get("abort_pipeline") else user_input
+#     while True:
+#         user_input = input("\nYou > ")
+#         if user_input.lower() == "quit":
+#             break
 
-        user_message = types.Content(parts=[types.Part(text=input_text)])
+#         state = (await session_service.get_session(APP_NAME, USER_ID, SESSION_ID)).state
+#         input_text = state.get("guardrail_output") if state.get("abort_pipeline") else user_input
 
-        for event in runner.run(user_id=USER_ID, session_id=SESSION_ID, new_message=user_message):
-            if event.content and event.content.parts:
-                msg = event.content.parts[0].text
-                print(f"\n🧩 Agent > {msg}\n")
+#         user_message = types.Content(parts=[types.Part(text=input_text)])
 
-                if event.is_final_response():
-                    state_changes = {"guardrail_output": msg}
-                    actions_with_update = EventActions(state_delta=state_changes)
-                    system_event = Event(
-                        invocation_id=str(uuid.uuid4()),
-                        author="system",
-                        actions=actions_with_update,
-                        timestamp=time.time()
-                    )
-                    await session_service.append_event(session, system_event)
+#         for event in runner.run(user_id=USER_ID, session_id=SESSION_ID, new_message=user_message):
+#             if event.content and event.content.parts:
+#                 msg = event.content.parts[0].text
+#                 print(f"\n🧩 Agent > {msg}\n")
 
-    final_session = await session_service.get_session(APP_NAME, USER_ID, SESSION_ID)
-    print("\n🧾 Final Session State:\n", final_session.state)
+#                 if event.is_final_response():
+#                     state_changes = {"guardrail_output": msg}
+#                     actions_with_update = EventActions(state_delta=state_changes)
+#                     system_event = Event(
+#                         invocation_id=str(uuid.uuid4()),
+#                         author="system",
+#                         actions=actions_with_update,
+#                         timestamp=time.time()
+#                     )
+#                     await session_service.append_event(session, system_event)
+
+#     final_session = await session_service.get_session(APP_NAME, USER_ID, SESSION_ID)
+#     print("\n🧾 Final Session State:\n", final_session.state)
 
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# if __name__ == "__main__":
+#     asyncio.run(main())
