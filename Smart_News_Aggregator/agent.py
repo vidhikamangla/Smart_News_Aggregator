@@ -1,53 +1,66 @@
+# agent.py
+"""
+Enhanced Smart News Aggregator Agent with:
+1. MCP integration (expose tools to external clients)
+2. A2A integration (communicate with CrewAI agent)
+3. Original ADK functionality
+"""
+
 import datetime
 import json
 import logging
 import asyncio
 import uuid
 import time
+import os
 from typing import Optional, Dict, Any, Set, List
 from pydantic import BaseModel
 from google.genai import types
-from google.genai import types as genai_types  
+from google.genai import types as genai_types
 
 from google.adk.agents import LlmAgent, SequentialAgent, ParallelAgent
 from google.adk.agents.callback_context import CallbackContext
-
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
-
-
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
-from google.adk.tools import google_search     
-
+from google.adk.tools.function_tool import FunctionTool
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
-
 from google.adk.events import Event, EventActions
 
-import os
+# MCP integration
+from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+from mcp import StdioServerParameters
+
 from email.mime.text import MIMEText
 import smtplib
 
-from Scrapers.entertainment_scraper import scrape_entertainment_top_n
-from Scrapers.sports_scraper import scrape_sports_top_n
-from Scrapers.international_scraper import scrape_international_top_n
-from Scrapers.national_scraper import scrape_national_top_n
-from Scrapers.states_scraper import scrape_states_top_n
+from .Scrapers.entertainment_scraper import scrape_entertainment_top_n
+from .Scrapers.sports_scraper import scrape_sports_top_n
+from .Scrapers.international_scraper import scrape_international_top_n
+from .Scrapers.national_scraper import scrape_national_top_n
+from .Scrapers.states_scraper import scrape_states_top_n
+
+# A2A CrewAI integration
+from .crewai_bridge_agent import (
+    analyze_news_with_crewai,
+    get_trend_analysis,
+    fact_check_articles
+)
 
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Verify API key is loaded
-if not os.getenv("GOOGLE_API_KEY"):
-    print("WARNING: GOOGLE_API_KEY not found in .env file!")
+# Configuration
+STYLE_OF_WRITING = os.getenv("STYLE_OF_WRITING", "sarcastic")
+TARGET_LANGUAGE = os.getenv("TARGET_LANGUAGE", "esp")
+MCP_SERVER_PATH = os.path.join(os.path.dirname(__file__), "mcp_server.py")
 
-STYLE_OF_WRITING = "sarcastic"
-TARGET_LANGUAGE = "esp"  # ISO code, e.g. hi=Hindi, en=English, ta=Tamil
-
-
+# Constants from original agent
 class NewsItem(BaseModel):
     title: str
     link: str
@@ -55,7 +68,6 @@ class NewsItem(BaseModel):
     author: Optional[str] = ""
     article: Optional[str] = ""
     image_url: Optional[str] = None
-
 
 BANNED_WORDS: Set[str] = {
     "kill yourself", "how to make a bomb", "i will kill you", "rape",
@@ -65,7 +77,8 @@ BANNED_WORDS: Set[str] = {
 NEWS_KEYWORDS: Set[str] = {
     "news", "headlines", "article", "happening in", "sports",
     "entertainment", "politics", "business", "tech", "latest",
-    "updates", "breaking", "tell me about", "what's new", "information"
+    "updates", "breaking", "tell me about", "what's new", "information",
+    "analyze", "trends", "fact check", "insights"
 }
 
 VALID_STATES: Set[str] = {
@@ -75,9 +88,7 @@ VALID_STATES: Set[str] = {
     "rajasthan", "punjab", "kerala", "andhra pradesh", "goa"
 }
 
-
-# EMAIL TOOL
-
+# --- Email Tool (from original) ---
 def send_email_smtp(to_addr: str, subject: str, html_body: str) -> str:
     SMTP_SERVER = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -91,11 +102,6 @@ def send_email_smtp(to_addr: str, subject: str, html_body: str) -> str:
         return "ERROR: invalid recipient email"
     if not subject or not html_body:
         return "ERROR: subject/body required"
-    
-    # msg = MIMEText("html_body", "html", "utf-8")
-    # msg["Subject"] = "trial"
-    # msg["From"] = FROM_ADDR
-    # msg["To"] = "vidhika.mangla.22cse@bmu.edu.in"
 
     try:
         msg = MIMEText(html_body, "html", "utf-8")
@@ -108,66 +114,28 @@ def send_email_smtp(to_addr: str, subject: str, html_body: str) -> str:
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
         return "OK"
-    
     except Exception as e:
         return f"ERROR: {e}"
-    
-    
-# -------------------------------------------------------------
 
+# --- Callbacks (from original) ---
 def before_agent_callback(callback_context: CallbackContext):
-    """Logs start of agent execution."""
     state = callback_context.state
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Initialize global counter
     state["run_counter"] = state.get("run_counter", 0) + 1
     state["last_agent_start"] = timestamp
-
-    print(f"\n=== AGENT START] ===")
+    print(f"\n=== AGENT START ===")
     print(f"Run #: {state['run_counter']}")
     print(f"Timestamp: {timestamp}")
-
-    # Also logging via logging module
-    # logging.info(f"Starting agent (Run #{state['run_counter']}) at {timestamp}")
-
     return None
-
 
 def after_agent_callback(callback_context: CallbackContext):
-    """Logs end of agent execution and duration."""
     state = callback_context.state
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Compute duration if possible
-    try:
-        start_str = state.get("last_agent_start")
-        if start_str:
-            start_dt = datetime.datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-            duration = (datetime.datetime.now() - start_dt).total_seconds()
-        else:
-            duration = None
-    except Exception:
-        duration = None
-
     print(f"=== AGENT END ===")
-    # if duration is not None:
-    #     print(f"Duration: {duration:.2f}s")
-    #     logging.info(f"Completed agent in {duration:.2f}s")
-    # else:
-    #     logging.info(f"Completed agent (no duration recorded)")
-
-    # Record completion in state
     state["last_agent_end"] = timestamp
-    state.setdefault("agent_timeline", []).append({
-        "completed_at": timestamp,
-        "duration_sec": duration
-    })
-
     return None
 
-# GUARDRAIL 
-
+# --- Guardrails (from original) ---
 def input_guardrail(callback_context: CallbackContext, llm_request: LlmRequest) -> Optional[LlmResponse]:
     last_user_text = ""
     if llm_request.contents:
@@ -186,13 +154,12 @@ def input_guardrail(callback_context: CallbackContext, llm_request: LlmRequest) 
         return LlmResponse(content=genai_types.Content(role="model", parts=[genai_types.Part(text=msg)]))
 
     if not any(w in last_user_text for w in NEWS_KEYWORDS):
-        msg = "📰 I am a news assistant. I can only fetch news, headlines, and articles."
+        msg = "📰 I am a news assistant. I can fetch news, headlines, articles, and provide analysis."
         callback_context.state["abort_pipeline"] = True
         callback_context.state["guardrail_output"] = msg
         return LlmResponse(content=genai_types.Content(role="model", parts=[genai_types.Part(text=msg)]))
 
     return None
-
 
 def tool_guardrail(tool: BaseTool, args: Dict[str, Any], tool_context: ToolContext) -> Optional[Dict]:
     if tool.name == "get_states_news":
@@ -203,8 +170,7 @@ def tool_guardrail(tool: BaseTool, args: Dict[str, Any], tool_context: ToolConte
             return {"status": "error", "error_message": f"Policy Error: '{state}' is not a valid state or city."}
     return None
 
-
-
+# --- Scraper Functions (from original) ---
 def wrap(items: list) -> List[NewsItem]:
     return [NewsItem(**item) for item in items if item.get("article")]
 
@@ -223,6 +189,21 @@ def get_sports_news(limit: int = 10) -> List[NewsItem]:
 def get_entertainment_news(limit: int = 10) -> List[NewsItem]:
     return wrap(scrape_entertainment_top_n(limit))
 
+# --- A2A Integration: CrewAI Analysis Tools ---
+def analyze_news_crewai(analysis_type: str = "comprehensive") -> Dict[str, Any]:
+    """
+    A2A Tool: Analyze scraped news using CrewAI agent
+    This reads from state['scraper_output'] and performs advanced analysis
+    """
+    return {
+        "tool": "analyze_news_crewai",
+        "analysis_type": analysis_type,
+        "note": "This will be processed by the crewai_analyzer_agent"
+    }
+
+# --- Agent Definitions ---
+
+# 1. Scraper Agent (unchanged from original)
 scraper_agent = LlmAgent(
     model="gemini-2.5-flash-lite",
     name="scraper_agent",
@@ -242,13 +223,43 @@ scraper_agent = LlmAgent(
     before_tool_callback=tool_guardrail,
 )
 
+# 2. NEW: CrewAI Analyzer Agent (A2A Integration)
+crewai_analyzer_agent = LlmAgent(
+    model="gemini-2.5-flash-lite",
+    name="crewai_analyzer_agent",
+    description="Uses CrewAI to perform deep analysis on scraped news articles",
+    instruction="""
+    You have access to advanced AI analysis via CrewAI agents.
+    
+    If the user asks for:
+    - "analyze" or "insights" → call analyze_news_with_crewai with type="comprehensive"
+    - "trends" or "what's trending" → call get_trend_analysis
+    - "fact check" or "verify" → call fact_check_articles
+    
+    Input comes from state['scraper_output']. Convert NewsItem objects to dicts before calling.
+    Store the analysis result in your output.
+    """,
+    tools=[
+        FunctionTool(analyze_news_with_crewai),
+        FunctionTool(get_trend_analysis),
+        FunctionTool(fact_check_articles),
+    ],
+    output_key="crewai_analysis",
+    before_agent_callback=before_agent_callback,
+    after_agent_callback=after_agent_callback,
+)
+
+# 3. Summarizer Agent (updated to handle both news and analysis)
 summariser_agent = LlmAgent(
     model="gemini-2.5-flash-lite",
     name="summariser_agent",
-    description=f"Summarises scraped articles and writes in a {STYLE_OF_WRITING} tone.",
+    description=f"Summarizes scraped articles and analysis in a {STYLE_OF_WRITING} tone.",
     instruction=(
-        f"You will receive scraper_output (list of news items) OR a guardrail message.\n"
-        "If input is a guardrail message (starts with 🚫 or 📰), just repeat it as-is.\n\n"
+        f"You will receive:\n"
+        "1. scraper_output (list of news items)\n"
+        "2. crewai_analysis (optional AI analysis)\n"
+        "3. OR a guardrail message\n\n"
+        "If input is a guardrail message, repeat it as-is.\n\n"
         f"Otherwise, write a *clean markdown news report* in a *{STYLE_OF_WRITING} tone*.\n\n"
         "CRITICAL RULES:\n"
         "• Output ONLY markdown.\n"
@@ -256,6 +267,9 @@ summariser_agent = LlmAgent(
         "   ## Title\n"
         "   *Date:* | *Author:* | [Source](link) | *Image:* image_url\n"
         "   Summary paragraph (120-160 words).\n"
+        "• If crewai_analysis exists, add a section:\n"
+        "   ## AI Analysis\n"
+        "   [CrewAI insights here]\n"
         "• No bullet lists or prefaces.\n"
     ),
     output_key="summary_output",
@@ -263,6 +277,7 @@ summariser_agent = LlmAgent(
     after_agent_callback=after_agent_callback,
 )
 
+# 4. Multilingual Agent (unchanged)
 multilingual_agent = LlmAgent(
     name="MultilingualTranslatorAgent",
     model="gemini-2.5-flash-lite",
@@ -277,6 +292,7 @@ multilingual_agent = LlmAgent(
     after_agent_callback=after_agent_callback,
 )
 
+# 5. Email Agent (unchanged)
 email_agent = LlmAgent(
     name="EmailNotificationAgent",
     model="gemini-2.5-flash-lite",
@@ -287,7 +303,7 @@ Steps:
 1) Subject: if state{translated_text} exists, start with it; max 90 chars.
 2) Body:
    - brief intro + 3-5 bullets distilled from (translated_text) for each news article (convert Markdown to HTML bullets).
-   - for all articles, If any URL appears, add 'Read more:' with the URL, after that all  respective articles
+   - for all articles, If any URL appears, add 'Read more:' with the URL, after that all respective articles
 3) Call send_email_smtp(
    to_addr=vidhika.mangla.22cse@bmu.edu.in,
    subject=subject,
@@ -302,63 +318,56 @@ Return only the tool's string ('OK' or 'ERROR: ...').
     after_agent_callback=after_agent_callback,
 )
 
+# --- Root Agent: Sequential Pipeline with Parallel Analysis ---
+# Note: We can run scraper and analysis in parallel or sequentially
+# Here's a sequential version with optional analysis
 
 root_agent = SequentialAgent(
     name="NewsPipeline",
-    sub_agents=[scraper_agent, summariser_agent, multilingual_agent, email_agent],
-    description=f"Fetch → Summarise → Translate (with guardrail awareness).-> send email"
+    sub_agents=[
+        scraper_agent,
+        crewai_analyzer_agent,  #A2A integration
+        summariser_agent,
+        multilingual_agent,
+        email_agent
+    ],
+    description=(
+        "News pipeline: "
+        "Fetch → Analyze with CrewAI → Summarize → Translate → Email"
+    )
 )
 
-__all__ = ['root_agent']
+# --- Async Agent Creation (for MCP Tools) ---
+async def get__agent_async():
+    """
+    Creates the enhanced agent with MCP tools
+    Use this when you want to consume tools from YOUR OWN MCP server
+    """
+    # Absolute path to your MCP server
+    mcp_server_path = os.path.abspath(MCP_SERVER_PATH)
+    
+    # Create MCP Toolset that connects to your own MCP server
+    mcp_toolset = MCPToolset(
+        connection_params=StdioConnectionParams(
+            server_params=StdioServerParameters(
+                command='python3',
+                args=[mcp_server_path],
+            ),
+        ),
+        # Optional: filter specific tools
+        # tool_filter=['get_national_news_mcp', 'get_sports_news_mcp']
+    )
+    
+    # Create an agent that uses MCP tools (optional - for testing MCP integration)
+    mcp_consumer_agent = LlmAgent(
+        model="gemini-2.5-flash-lite",
+        name="mcp_consumer_agent",
+        instruction="Use MCP tools to fetch news from the MCP server.",
+        description="Consumes news via MCP protocol",
+        tools=[mcp_toolset],
+        output_key="mcp_output"
+    )
+    
+    return mcp_consumer_agent, mcp_toolset
 
-# async def main():
-#     session_service = InMemorySessionService()
-#     SESSION_ID = str(uuid.uuid4())
-#     USER_ID = "vid"
-#     APP_NAME = "SmartNewsAggregator"
-
-#     state_context = {"user": "Vidhika", "guardrail_output": None, "abort_pipeline": False}
-
-#     session = await session_service.create_session(
-#         app_name=APP_NAME,
-#         user_id=USER_ID,
-#         session_id=SESSION_ID,
-#         state=state_context
-#     )
-
-#     print(f"Session ID: {session.id}")
-#     runner = Runner(agent=root_agent, session_service=session_service, app_name=APP_NAME)
-
-#     while True:
-#         user_input = input("\nYou > ")
-#         if user_input.lower() == "quit":
-#             break
-
-#         state = (await session_service.get_session(APP_NAME, USER_ID, SESSION_ID)).state
-#         input_text = state.get("guardrail_output") if state.get("abort_pipeline") else user_input
-
-#         user_message = types.Content(parts=[types.Part(text=input_text)])
-
-#         for event in runner.run(user_id=USER_ID, session_id=SESSION_ID, new_message=user_message):
-#             if event.content and event.content.parts:
-#                 msg = event.content.parts[0].text
-#                 print(f"\n🧩 Agent > {msg}\n")
-
-#                 if event.is_final_response():
-#                     state_changes = {"guardrail_output": msg}
-#                     actions_with_update = EventActions(state_delta=state_changes)
-#                     system_event = Event(
-#                         invocation_id=str(uuid.uuid4()),
-#                         author="system",
-#                         actions=actions_with_update,
-#                         timestamp=time.time()
-#                     )
-#                     await session_service.append_event(session, system_event)
-
-#     final_session = await session_service.get_session(APP_NAME, USER_ID, SESSION_ID)
-#     print("\n🧾 Final Session State:\n", final_session.state)
-
-
-
-# if __name__ == "__main__":
-#     asyncio.run(main())
+__all__ = ['root_agent', 'get_agent_async']
